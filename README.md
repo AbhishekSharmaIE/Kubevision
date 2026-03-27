@@ -38,6 +38,25 @@ Kubernetes cluster management dashboard: real-time metrics, Helm, and a Go API (
    curl -s http://127.0.0.1:8080/api/v1/clusters
    ```
 
+### Phase 2 — Users, teams, permissions (API)
+
+Identity is interim: send `Authorization: Bearer <user-uuid>` (the row id from `users`). The first `POST /api/v1/users` call creates the bootstrap admin **without** a bearer token; further user creation requires an admin bearer.
+
+Examples:
+
+```bash
+# Bootstrap admin (empty DB only)
+curl -s -X POST http://127.0.0.1:8080/api/v1/users \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@local","name":"Admin","password":"changeme12","isAdmin":true}'
+
+# Authenticated call (replace USER_ID)
+curl -s http://127.0.0.1:8080/api/v1/teams \
+  -H "Authorization: Bearer USER_ID"
+```
+
+RBAC evaluation: `GET /api/v1/permissions/check?cluster_id=...&namespace=...&permission=read|write|admin`. Example enforced route: `GET /api/v1/rbac/probe/:cluster_id/:namespace` (requires read).
+
 Stop containers: `make deps-down`
 
 ## Build
