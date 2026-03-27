@@ -2,6 +2,8 @@
 
 Kubernetes cluster management dashboard: real-time metrics, Helm, and a Go API (see [KUBEVISION_PROJECT.md](./KUBEVISION_PROJECT.md) for the full roadmap).
 
+**Engineering guide (setup, phases, curl walkthroughs):** [Documentation.md](./Documentation.md).
+
 ## Prerequisites
 
 - **Go 1.22+**
