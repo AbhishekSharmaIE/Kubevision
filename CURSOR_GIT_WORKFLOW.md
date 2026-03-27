@@ -1,6 +1,6 @@
 # 🤖 Cursor AI — Git-Integrated Build Prompts for KubeVision
 # Every file created → staged → committed → pushed. No exceptions.
-
+ok
 ---
 
 ## ⚙️ ONE-TIME SETUP — Run this first in Cursor Terminal before anything else
