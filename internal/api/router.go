@@ -75,6 +75,8 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		})
 	}
 
+	registerPhase2Routes(v1, cfg)
+
 	return r
 }
 
