@@ -153,6 +153,15 @@ func runHelmHistory(cfg *action.Configuration, releaseName string) ([]*release.R
 	return h.Run(releaseName)
 }
 
+func runHelmGetValues(cfg *action.Configuration, releaseName string, revision int, merged bool) (map[string]interface{}, error) {
+	gv := action.NewGetValues(cfg)
+	if revision > 0 {
+		gv.Version = revision
+	}
+	gv.AllValues = merged
+	return gv.Run(releaseName)
+}
+
 // mergeHelmHistoryByRevision unions revisions from two drivers; same revision prefers entries from primary.
 func mergeHelmHistoryByRevision(primary, secondary []*release.Release) []*release.Release {
 	byRev := make(map[int]*release.Release)
@@ -360,4 +369,85 @@ func (h *HelmHandler) HelmReleaseHistory(c *gin.Context) {
 		meta["driver"] = driverName
 	}
 	httputil.DataJSONWithMeta(c, http.StatusOK, out, meta)
+}
+
+// HelmReleaseValues handles GET /clusters/:id/namespaces/:namespace/helm/releases/:release/values.
+// Query: revision (Helm release revision, 0 or omit = latest), merged (default true = chart defaults coalesced with user values;
+// merged=false returns user-supplied overrides only), driver: secret, configmap, or both (secret first, then configmap if not found).
+func (h *HelmHandler) HelmReleaseValues(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	releaseName := strings.TrimSpace(c.Param("release"))
+	if ns == "" || releaseName == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace and release name required")
+		return
+	}
+	cl, ok := h.clusterClient(c, id)
+	if !ok {
+		return
+	}
+
+	revision := 0
+	if v := c.Query("revision"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			revision = n
+		}
+	}
+	merged := true
+	if v := strings.TrimSpace(strings.ToLower(c.Query("merged"))); v == "false" || v == "0" {
+		merged = false
+	}
+
+	driverName, useBoth, driverOK := parseHelmStorageQuery(c.Query("driver"))
+	if !driverOK {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "driver must be secret, configmap, or both")
+		return
+	}
+
+	tryValues := func(storageDriver string) (map[string]interface{}, error) {
+		cfg, e := helmActionConfig(ns, cl.Config, storageDriver)
+		if e != nil {
+			return nil, e
+		}
+		return runHelmGetValues(cfg, releaseName, revision, merged)
+	}
+
+	var vals map[string]interface{}
+	var err error
+	resolvedDriver := driverName
+
+	if useBoth {
+		vals, err = tryValues("secret")
+		if err != nil && errors.Is(err, driver.ErrReleaseNotFound) {
+			vals, err = tryValues("configmap")
+			resolvedDriver = "configmap"
+		} else if err == nil {
+			resolvedDriver = "secret"
+		}
+	} else {
+		vals, err = tryValues(driverName)
+	}
+
+	if err != nil {
+		if errors.Is(err, driver.ErrReleaseNotFound) {
+			httputil.ErrorJSON(c, http.StatusNotFound, "release not found")
+			return
+		}
+		httputil.ErrorJSON(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	if vals == nil {
+		vals = map[string]interface{}{}
+	}
+
+	meta := gin.H{
+		"release": releaseName, "namespace": ns, "merged": merged, "revision": revision,
+	}
+	if useBoth {
+		meta["driver"] = "both"
+		meta["resolvedDriver"] = resolvedDriver
+	} else {
+		meta["driver"] = driverName
+	}
+	httputil.DataJSONWithMeta(c, http.StatusOK, vals, meta)
 }
