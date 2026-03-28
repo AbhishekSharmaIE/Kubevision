@@ -2,11 +2,14 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/registry"
+	"helm.sh/helm/v3/pkg/storage/driver"
 )
 
 const (
@@ -67,6 +71,27 @@ func validateHelmChartRef(chart string) error {
 		return fmt.Errorf("invalid chart reference")
 	}
 	return nil
+}
+
+func isHelmReleaseNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, driver.ErrReleaseNotFound) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "release not loaded") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no release provided")
+}
+
+func parseQueryBool(c *gin.Context, key string, defaultVal bool) bool {
+	v := strings.TrimSpace(strings.ToLower(c.Query(key)))
+	if v == "" {
+		return defaultVal
+	}
+	return v == "true" || v == "1" || v == "yes"
 }
 
 func helmOpTimeout(wait bool, timeoutSec int) time.Duration {
@@ -288,5 +313,163 @@ func (h *HelmHandler) HelmUpgradeRelease(c *gin.Context) {
 		return
 	}
 
+	httputil.DataJSON(c, http.StatusOK, gin.H{"release": releaseToJSON(rel)})
+}
+
+type helmRollbackBody struct {
+	Revision       int  `json:"revision"`
+	DryRun         bool `json:"dryRun"`
+	Wait           bool `json:"wait"`
+	TimeoutSeconds int  `json:"timeoutSeconds"`
+	DisableHooks   bool `json:"disableHooks"`
+	Force          bool `json:"force"`
+	Recreate       bool `json:"recreate"`
+	CleanupOnFail  bool `json:"cleanupOnFail"`
+}
+
+func bindHelmRollbackBody(c *gin.Context) (helmRollbackBody, error) {
+	var body helmRollbackBody
+	if c.Request.Body == nil {
+		return body, nil
+	}
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return body, err
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return body, nil
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return body, err
+	}
+	return body, nil
+}
+
+// HelmUninstallRelease handles DELETE /clusters/:id/namespaces/:namespace/helm/releases/:release.
+// Query: driver=secret|configmap; dryRun, wait, keepHistory, disableHooks, timeoutSeconds (when wait).
+func (h *HelmHandler) HelmUninstallRelease(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	releaseName := strings.TrimSpace(c.Param("release"))
+	if ns == "" || releaseName == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace and release name required")
+		return
+	}
+	cl, ok := h.clusterClient(c, id)
+	if !ok {
+		return
+	}
+
+	driverName, useBoth, driverOK := parseHelmStorageQuery(c.Query("driver"))
+	if !driverOK {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "driver must be secret, configmap, or both")
+		return
+	}
+	if useBoth {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "driver=both is not supported for uninstall; use secret or configmap")
+		return
+	}
+
+	cfg, err := helmActionConfig(ns, cl.Config, driverName)
+	if err != nil {
+		httputil.ErrorJSON(c, http.StatusInternalServerError, "helm init failed: "+err.Error())
+		return
+	}
+
+	wait := parseQueryBool(c, "wait", false)
+	timeoutSec, _ := strconv.Atoi(c.Query("timeoutSeconds"))
+
+	u := action.NewUninstall(cfg)
+	u.DryRun = parseQueryBool(c, "dryRun", false)
+	u.Wait = wait
+	u.KeepHistory = parseQueryBool(c, "keepHistory", false)
+	u.DisableHooks = parseQueryBool(c, "disableHooks", false)
+	u.Timeout = helmOpTimeout(wait, timeoutSec)
+
+	res, err := u.Run(releaseName)
+	if err != nil {
+		if isHelmReleaseNotFound(err) {
+			httputil.ErrorJSON(c, http.StatusNotFound, "release not found")
+			return
+		}
+		httputil.ErrorJSON(c, http.StatusBadGateway, "helm uninstall failed: "+err.Error())
+		return
+	}
+	out := gin.H{"release": releaseName, "namespace": ns, "driver": driverName}
+	if res != nil && res.Release != nil {
+		out["info"] = releaseToJSON(res.Release)
+	}
+	httputil.DataJSON(c, http.StatusOK, out)
+}
+
+// HelmRollbackRelease handles POST /clusters/:id/namespaces/:namespace/helm/releases/:release/rollback.
+// JSON body optional: revision (0 = roll back to previous deployed revision), dryRun, wait, timeoutSeconds,
+// disableHooks, force, recreate, cleanupOnFail. Query driver=secret|configmap.
+func (h *HelmHandler) HelmRollbackRelease(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	releaseName := strings.TrimSpace(c.Param("release"))
+	if ns == "" || releaseName == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace and release name required")
+		return
+	}
+	cl, ok := h.clusterClient(c, id)
+	if !ok {
+		return
+	}
+
+	body, err := bindHelmRollbackBody(c)
+	if err != nil {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return
+	}
+
+	driverName, useBoth, driverOK := parseHelmStorageQuery(c.Query("driver"))
+	if !driverOK {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "driver must be secret, configmap, or both")
+		return
+	}
+	if useBoth {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "driver=both is not supported for rollback; use secret or configmap")
+		return
+	}
+
+	cfg, err := helmActionConfig(ns, cl.Config, driverName)
+	if err != nil {
+		httputil.ErrorJSON(c, http.StatusInternalServerError, "helm init failed: "+err.Error())
+		return
+	}
+
+	rb := action.NewRollback(cfg)
+	rb.Version = body.Revision
+	rb.DryRun = body.DryRun
+	rb.Wait = body.Wait
+	rb.DisableHooks = body.DisableHooks
+	rb.Force = body.Force
+	rb.Recreate = body.Recreate
+	rb.CleanupOnFail = body.CleanupOnFail
+	rb.MaxHistory = 10
+	rb.Timeout = helmOpTimeout(body.Wait, body.TimeoutSeconds)
+
+	if err := rb.Run(releaseName); err != nil {
+		msg := strings.ToLower(err.Error())
+		if isHelmReleaseNotFound(err) || strings.Contains(msg, "invalid revision") || strings.Contains(msg, "release has no") {
+			httputil.ErrorJSON(c, http.StatusNotFound, "release or revision not found: "+err.Error())
+			return
+		}
+		httputil.ErrorJSON(c, http.StatusBadGateway, "helm rollback failed: "+err.Error())
+		return
+	}
+
+	if body.DryRun {
+		httputil.DataJSON(c, http.StatusOK, gin.H{"release": releaseName, "namespace": ns, "driver": driverName, "dryRun": true})
+		return
+	}
+
+	rel, err := cfg.Releases.Last(releaseName)
+	if err != nil {
+		httputil.DataJSON(c, http.StatusOK, gin.H{"release": releaseName, "namespace": ns, "driver": driverName, "note": "rollback ok; could not reload release: " + err.Error()})
+		return
+	}
 	httputil.DataJSON(c, http.StatusOK, gin.H{"release": releaseToJSON(rel)})
 }
