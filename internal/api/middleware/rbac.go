@@ -92,3 +92,35 @@ func RequireClusterPermissionByID(pool *pgxpool.Pool, clusterParam, namespacePar
 		c.Next()
 	}
 }
+
+// RequireClusterScopePermission enforces RBAC on :id (clusterParam) using max permission
+// across all namespaces for that cluster (for cluster-wide APIs: nodes, all namespaces list).
+func RequireClusterScopePermission(pool *pgxpool.Pool, clusterParam, minPermission string) gin.HandlerFunc {
+	if err := rbac.ParsePermission(minPermission); err != nil {
+		panic("middleware.RequireClusterScopePermission: " + err.Error())
+	}
+	return func(c *gin.Context) {
+		uid := UserID(c)
+		if uid == uuid.Nil {
+			httputil.AbortWithErrorJSON(c, http.StatusUnauthorized, "not authenticated")
+			return
+		}
+		clusterID := c.Param(clusterParam)
+		if clusterID == "" {
+			httputil.AbortWithErrorJSON(c, http.StatusBadRequest, "cluster id required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+		ok, err := rbac.UserSatisfiesClusterScope(ctx, pool, uid, clusterID, minPermission)
+		if err != nil {
+			httputil.AbortWithErrorJSON(c, http.StatusInternalServerError, "permission check failed")
+			return
+		}
+		if !ok {
+			httputil.AbortWithErrorJSON(c, http.StatusForbidden, "insufficient permission for this cluster")
+			return
+		}
+		c.Next()
+	}
+}

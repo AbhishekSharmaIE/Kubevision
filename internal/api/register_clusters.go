@@ -25,10 +25,10 @@ func registerClusterRoutes(v1 *gin.RouterGroup, cfg RouterConfig) {
 		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
 		rh.ListPods)
 	g.GET("/clusters/:id/namespaces",
-		middleware.RequireClusterPermissionByID(cfg.DB, "id", "", rbac.PermRead),
+		middleware.RequireClusterScopePermission(cfg.DB, "id", rbac.PermRead),
 		rh.ListNamespaces)
 	g.GET("/clusters/:id/nodes",
-		middleware.RequireClusterPermissionByID(cfg.DB, "id", "", rbac.PermRead),
+		middleware.RequireClusterScopePermission(cfg.DB, "id", rbac.PermRead),
 		rh.ListNodes)
 
 	g.GET("/clusters/:id", ch.Get)

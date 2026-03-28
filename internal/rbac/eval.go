@@ -95,3 +95,48 @@ func UserSatisfiesPermission(ctx context.Context, pool *pgxpool.Pool, userID uui
 	}
 	return got >= need, nil
 }
+
+// UserMaxRankOnCluster returns the highest permission rank the user has on clusterID
+// across any namespace (any team membership row). Admins get admin rank.
+func UserMaxRankOnCluster(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, clusterID string) (int, error) {
+	admin, err := UserIsAdmin(ctx, pool, userID)
+	if err != nil {
+		return 0, err
+	}
+	if admin {
+		return Rank(PermAdmin), nil
+	}
+	const q = `
+SELECT cp.permission
+FROM cluster_permissions cp
+INNER JOIN team_members tm ON tm.team_id = cp.team_id
+WHERE tm.user_id = $1 AND cp.cluster_id = $2`
+	rows, err := pool.Query(ctx, q, userID, clusterID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	max := 0
+	for rows.Next() {
+		var perm string
+		if err := rows.Scan(&perm); err != nil {
+			return 0, err
+		}
+		if r := Rank(perm); r > max {
+			max = r
+		}
+	}
+	return max, rows.Err()
+}
+
+// UserSatisfiesClusterScope returns true if max rank on cluster meets required permission.
+func UserSatisfiesClusterScope(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, clusterID, required string) (bool, error) {
+	if err := ParsePermission(required); err != nil {
+		return false, err
+	}
+	got, err := UserMaxRankOnCluster(ctx, pool, userID, clusterID)
+	if err != nil {
+		return false, err
+	}
+	return got >= Rank(required), nil
+}

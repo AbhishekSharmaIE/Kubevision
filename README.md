@@ -68,7 +68,7 @@ Details: [Documentation.md](./Documentation.md).
 
 **Clusters (JWT required):** `GET/POST/DELETE /api/v1/clusters`, `GET /api/v1/clusters/:id` — register kubeconfig via JSON (`kubeconfig` or `kubeconfigBase64`) or multipart field `kubeconfig`. List is scoped by team RBAC unless you are admin.
 
-**Cluster resources (JWT + read on namespace `*` or target ns):** `GET /api/v1/clusters/:id/nodes`, `GET .../namespaces`, `GET .../namespaces/:namespace/pods`.
+**Cluster resources (JWT + RBAC):** `GET .../nodes` and `GET .../namespaces` need **read** on the cluster (any namespace you are granted). `GET .../namespaces/:namespace/pods` needs **read** on that namespace (or `*`).
 
 Stop containers: `make deps-down`
 
