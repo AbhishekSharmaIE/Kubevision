@@ -13,6 +13,7 @@ func registerClusterRoutes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	}
 	ch := handlers.NewClusterHandler(cfg.DB, cfg.ClusterManager)
 	rh := handlers.NewClusterResourcesHandler(cfg.ClusterManager)
+	hh := handlers.NewHelmHandler(cfg.ClusterManager)
 
 	g := v1.Group("")
 	g.Use(middleware.RequireAuth(cfg.JWT, cfg.Redis, cfg.DB))
@@ -51,6 +52,9 @@ func registerClusterRoutes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	g.GET("/clusters/:id/nodes",
 		middleware.RequireClusterScopePermission(cfg.DB, "id", rbac.PermRead),
 		rh.ListNodes)
+	g.GET("/clusters/:id/helm/releases",
+		middleware.RequireClusterScopePermission(cfg.DB, "id", rbac.PermRead),
+		hh.ListHelmReleases)
 
 	g.GET("/clusters/:id", ch.Get)
 	g.DELETE("/clusters/:id", middleware.RequireAdmin(), ch.Delete)
