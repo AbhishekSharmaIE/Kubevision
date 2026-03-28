@@ -50,3 +50,45 @@ func RequireClusterPermission(pool *pgxpool.Pool, minPermission string) gin.Hand
 		c.Next()
 	}
 }
+
+// RequireClusterPermissionByID enforces RBAC using :id (or clusterParam) as cluster UUID.
+// If namespaceParam is non-empty, the namespace is read from that path param; otherwise from
+// query ?namespace= (default "*" for cluster-wide APIs like nodes).
+func RequireClusterPermissionByID(pool *pgxpool.Pool, clusterParam, namespaceParam, minPermission string) gin.HandlerFunc {
+	if err := rbac.ParsePermission(minPermission); err != nil {
+		panic("middleware.RequireClusterPermissionByID: " + err.Error())
+	}
+	return func(c *gin.Context) {
+		uid := UserID(c)
+		if uid == uuid.Nil {
+			httputil.AbortWithErrorJSON(c, http.StatusUnauthorized, "not authenticated")
+			return
+		}
+		clusterID := c.Param(clusterParam)
+		if clusterID == "" {
+			httputil.AbortWithErrorJSON(c, http.StatusBadRequest, "cluster id required")
+			return
+		}
+		var ns string
+		if namespaceParam != "" {
+			ns = c.Param(namespaceParam)
+		} else {
+			ns = c.DefaultQuery("namespace", "*")
+		}
+		if ns == "" {
+			ns = "*"
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+		ok, err := rbac.UserSatisfiesPermission(ctx, pool, uid, clusterID, ns, minPermission)
+		if err != nil {
+			httputil.AbortWithErrorJSON(c, http.StatusInternalServerError, "permission check failed")
+			return
+		}
+		if !ok {
+			httputil.AbortWithErrorJSON(c, http.StatusForbidden, "insufficient permission for cluster/namespace")
+			return
+		}
+		c.Next()
+	}
+}
