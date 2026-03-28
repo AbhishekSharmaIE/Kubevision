@@ -40,24 +40,31 @@ Kubernetes cluster management dashboard: real-time metrics, Helm, and a Go API (
    curl -s http://127.0.0.1:8080/api/v1/clusters
    ```
 
-### Phase 2 — Users, teams, permissions (API)
+### Phase 2 & 3 — Users, teams, RBAC, JWT auth
 
-Identity is interim: send `Authorization: Bearer <user-uuid>` (the row id from `users`). The first `POST /api/v1/users` call creates the bootstrap admin **without** a bearer token; further user creation requires an admin bearer.
-
-Examples:
+Use **JWT access tokens** (`Authorization: Bearer <jwt>`). Tokens are stored in **Redis** until logout or refresh. Set `JWT_SECRET` (≥32 chars) in production—see `.env.example`.
 
 ```bash
-# Bootstrap admin (empty DB only)
+# 1) Bootstrap admin when users table is empty (no token)
 curl -s -X POST http://127.0.0.1:8080/api/v1/users \
   -H 'Content-Type: application/json' \
   -d '{"email":"admin@local","name":"Admin","password":"changeme12","isAdmin":true}'
 
-# Authenticated call (replace USER_ID)
+# 2) Login → copy .data.token from JSON
+curl -s -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@local","password":"changeme12"}'
+
+# 3) Call APIs (replace TOKEN)
 curl -s http://127.0.0.1:8080/api/v1/teams \
-  -H "Authorization: Bearer USER_ID"
+  -H "Authorization: Bearer TOKEN"
 ```
 
-RBAC evaluation: `GET /api/v1/permissions/check?cluster_id=...&namespace=...&permission=read|write|admin`. Example enforced route: `GET /api/v1/rbac/probe/:cluster_id/:namespace` (requires read).
+Refresh: `POST /api/v1/auth/refresh` with JSON `{"token":"<expired-or-current-jwt>"}` or the same `Authorization` header. Logout: `POST /api/v1/auth/logout` with a valid bearer token.
+
+RBAC: `GET /api/v1/permissions/check?...` and `GET /api/v1/rbac/probe/:cluster_id/:namespace` (requires read on that namespace).
+
+Details: [Documentation.md](./Documentation.md).
 
 Stop containers: `make deps-down`
 

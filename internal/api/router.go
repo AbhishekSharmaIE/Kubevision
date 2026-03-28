@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/AbhishekSharmaIE/Kubevision/internal/api/middleware"
+	"github.com/AbhishekSharmaIE/Kubevision/internal/auth"
 	"github.com/AbhishekSharmaIE/Kubevision/internal/k8s"
 	"github.com/AbhishekSharmaIE/Kubevision/internal/metrics"
 	"github.com/gin-gonic/gin"
@@ -21,6 +23,7 @@ type RouterConfig struct {
 	MetricsCollector *metrics.Collector
 	DB               *pgxpool.Pool
 	Redis            *redis.Client
+	JWT              *auth.JWT
 }
 
 // NewRouter returns the Gin engine with health, metrics, and API stubs.
@@ -30,6 +33,14 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	}
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
+	r.Use(middleware.RequestID())
+	if cfg.Redis != nil {
+		r.Use(middleware.RateLimit(cfg.Redis))
+	}
+	r.Use(middleware.CORS())
+	if cfg.DB != nil {
+		r.Use(middleware.Audit(cfg.DB))
+	}
 
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -75,6 +86,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		})
 	}
 
+	registerAuthRoutes(v1, cfg)
 	registerPhase2Routes(v1, cfg)
 
 	return r

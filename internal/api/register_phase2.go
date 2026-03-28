@@ -12,7 +12,7 @@ import (
 
 // registerPhase2Routes mounts users, teams, permissions, and RBAC probe routes under /api/v1.
 func registerPhase2Routes(v1 *gin.RouterGroup, cfg RouterConfig) {
-	if cfg.DB == nil {
+	if cfg.DB == nil || cfg.JWT == nil || cfg.Redis == nil {
 		return
 	}
 
@@ -20,11 +20,11 @@ func registerPhase2Routes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	th := handlers.NewTeamHandler(cfg.DB)
 	ph := handlers.NewPermissionHandler(cfg.DB)
 
-	// Bootstrap: first user without auth; later creates need admin bearer.
-	v1.POST("/users", middleware.OptionalBearerUser(cfg.DB), uh.Create)
+	// Bootstrap: first user without auth; later creates need admin JWT.
+	v1.POST("/users", middleware.UserCreateAuth(cfg.JWT, cfg.Redis, cfg.DB), uh.Create)
 
 	auth := v1.Group("")
-	auth.Use(middleware.BearerUser(cfg.DB))
+	auth.Use(middleware.RequireAuth(cfg.JWT, cfg.Redis, cfg.DB))
 
 	auth.GET("/users", middleware.RequireAdmin(), uh.List)
 	auth.GET("/users/:id", uh.Get)

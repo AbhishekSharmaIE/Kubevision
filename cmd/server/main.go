@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AbhishekSharmaIE/Kubevision/internal/api"
+	"github.com/AbhishekSharmaIE/Kubevision/internal/auth"
 	"github.com/AbhishekSharmaIE/Kubevision/internal/db"
 	"github.com/AbhishekSharmaIE/Kubevision/internal/k8s"
 	"github.com/AbhishekSharmaIE/Kubevision/internal/metrics"
@@ -51,11 +52,18 @@ func main() {
 	defer cancelCollector()
 	go collector.Start(ctxCollector)
 
+	jwtSvc, err := auth.NewJWTFromEnv()
+	if err != nil {
+		slog.Error("jwt configuration invalid", "error", err)
+		os.Exit(1)
+	}
+
 	router := api.NewRouter(api.RouterConfig{
 		ClusterManager:   clusterManager,
 		MetricsCollector: collector,
 		DB:               pgPool,
 		Redis:            redisClient,
+		JWT:              jwtSvc,
 	})
 
 	srv := &http.Server{

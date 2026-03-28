@@ -1,7 +1,7 @@
 # KubeVision — Engineering Documentation
 
 **Audience:** engineers onboarding to the repo, operators running the API locally, and contributors extending the backend.  
-**Scope:** everything implemented **to date** (Phase 1 platform + Phase 2 identity & RBAC APIs). The full product vision lives in [KUBEVISION_PROJECT.md](./KUBEVISION_PROJECT.md).
+**Scope:** everything implemented **to date** (Phase 1 platform, Phase 2 identity & RBAC APIs, Phase 3 JWT + Redis sessions + middleware chain). The full product vision lives in [KUBEVISION_PROJECT.md](./KUBEVISION_PROJECT.md).
 
 ---
 
@@ -24,7 +24,7 @@ flowchart LR
   end
   subgraph api [KubeVision API]
     G[Gin HTTP server]
-    M[Middleware: Bearer / RBAC]
+    M[Middleware: JWT / RBAC / limits]
     H[Handlers: users, teams, permissions]
   end
   subgraph data [Data plane]
@@ -42,7 +42,7 @@ flowchart LR
 |--------|----------------|
 | **Gin** | HTTP routing, JSON, timeouts, `/metrics` for Prometheus-style scraping. |
 | **Postgres** | Source of truth for users, teams, RBAC rows, registered clusters (metadata + kubeconfig blob). |
-| **Redis** | Reserved for sessions, caching, rate limits (wired in Phase 1; full use in later phases). |
+| **Redis** | **Sessions** (active JWT jti), **rate limiting** (per-IP window), future cache. |
 | **Embedded SQL migrations** | Repeatable schema on startup—no separate migration CLI required for local dev. |
 
 ---
@@ -167,23 +167,27 @@ make deps-down
 
 ## 5. Phase 2 — Users, teams, and RBAC
 
-### 5.1 Security model (interim, explicit)
+### 5.1 Security model (JWT + Redis sessions)
 
-We **have not** shipped JWT login yet. Identity today is:
+Authenticated requests send:
 
 ```http
-Authorization: Bearer <user-uuid>
+Authorization: Bearer <access-jwt>
 ```
 
-where `<user-uuid>` is the primary key of a row in `users`.
+| Mechanism | Why |
+|-----------|-----|
+| **HS256 JWT** | Stateless claims (`uid`, `email`, `is_admin`, `teams`, `jti`, `exp`) with a server-side secret (`JWT_SECRET`, min 32 chars). |
+| **Redis session per `jti`** | Revocable access: logout deletes the session key; refresh rotates `jti` and invalidates the old session. |
+| **DB reload on each request** | `RequireAuth` re-reads `users` so `is_admin` changes take effect without re-login. |
+| **Bootstrap `POST /users`** | When `COUNT(users)=0`, auth is skipped so the first admin can exist; once any user exists, `UserCreateAuth` enforces JWT for further creates. |
+| **bcrypt `password_hash`** | Used by `POST /api/v1/auth/login`. |
 
-| Design choice | Why |
-|---------------|-----|
-| **Bearer = user id** | Unblocks RBAC and CRUD without building login, refresh tokens, and session tables first. |
-| **Bootstrap first user without token** | Someone must create the initial admin when the database is empty—classic “first run” problem. |
-| **Passwords hashed with bcrypt** | Stored as `password_hash`; ready for a future `POST /auth/login` without schema churn. |
+Env tuning: `JWT_ACCESS_TTL_MINUTES`, `JWT_REFRESH_MAX_AGE_HOURS` (see `.env.example`).
 
-**Operational note:** Treat bearer UUIDs like secrets in shared environments until JWT + short-lived tokens land.
+### 5.1a Global middleware chain (Phase 3)
+
+Order in `internal/api/router.go`: **RequestID** → **RateLimit** (Redis, per-IP, skips `/healthz`, `/readyz`, `/metrics`) → **CORS** (`*` origin for dev) → **Audit** (writes to `audit_logs`, skips `/auth/login` body noise).
 
 ---
 
@@ -226,28 +230,38 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/users \
 
 *Why no `Authorization` header:* The handler allows the **first** user to be created without prior identity—otherwise you would need a database seed script out-of-band.
 
-*Response:* JSON `data` includes `id` (uuid). **Save this uuid** — it is your bearer token for subsequent calls.
+*Response:* JSON `data` includes user `id` and `passwordSet`; you **do not** use the raw uuid as a token anymore.
 
 ---
 
-**Step B — Call an authenticated endpoint**
+**Step B — Login and obtain JWT**
 
-Replace `YOUR_USER_ID` with the uuid from Step A.
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"changeme12"}'
+```
+
+*Why:* Issues a signed JWT and stores session state in Redis. Copy `data.token` for the next steps.
+
+---
+
+**Step C — Call an authenticated endpoint**
 
 ```bash
 curl -sS http://127.0.0.1:8080/api/v1/teams \
-  -H "Authorization: Bearer YOUR_USER_ID"
+  -H "Authorization: Bearer YOUR_JWT"
 ```
 
-*Why:* Proves `BearerUser` middleware and Postgres round-trip.
+*Why:* Proves `RequireAuth` (JWT + session + user row).
 
 ---
 
-**Step C — Create a team (admin only)**
+**Step C2 — Create a team (admin only)**
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/api/v1/teams \
-  -H "Authorization: Bearer YOUR_USER_ID" \
+  -H "Authorization: Bearer YOUR_JWT" \
   -H 'Content-Type: application/json' \
   -d '{"name":"platform","description":"Platform engineering"}'
 ```
@@ -262,7 +276,7 @@ You need a `teamId` (uuid from Step C) and a `clusterId` string that matches a c
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/api/v1/permissions \
-  -H "Authorization: Bearer YOUR_USER_ID" \
+  -H "Authorization: Bearer YOUR_JWT" \
   -H 'Content-Type: application/json' \
   -d '{
     "teamId": "TEAM_UUID",
@@ -280,7 +294,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/permissions \
 
 ```bash
 curl -sS "http://127.0.0.1:8080/api/v1/permissions/check?cluster_id=CLUSTER_UUID_AS_STRING&namespace=default&permission=read" \
-  -H "Authorization: Bearer MEMBER_USER_ID"
+  -H "Authorization: Bearer MEMBER_JWT"
 ```
 
 *Why:* Lets UIs and automation ask “can this user do X?” without duplicating SQL.
@@ -291,27 +305,30 @@ curl -sS "http://127.0.0.1:8080/api/v1/permissions/check?cluster_id=CLUSTER_UUID
 
 ```bash
 curl -sS "http://127.0.0.1:8080/api/v1/rbac/probe/CLUSTER_UUID_AS_STRING/default" \
-  -H "Authorization: Bearer MEMBER_USER_ID"
+  -H "Authorization: Bearer MEMBER_JWT"
 ```
 
 *Why:* Demonstrates **middleware-level** enforcement—the same pattern future `GET /clusters/:id/...` routes will use.
 
 ---
 
-### 5.4 Phase 2 route map (quick reference)
+### 5.4 Phase 2–3 route map (quick reference)
 
 | Area | Pattern | Auth |
 |------|---------|------|
-| Users | `POST /api/v1/users` | Optional bearer; first user unauthenticated |
-| Users | `GET /api/v1/users`, `DELETE /api/v1/users/:id` | Admin + bearer |
-| Users | `GET/PUT /api/v1/users/:id` | Self or admin |
-| Teams | `GET /api/v1/teams`, `GET /api/v1/teams/:id`, members list | Member of team or admin |
-| Teams | Mutations | Admin |
-| Permissions | List / get / check | Scoped to user’s teams unless admin |
-| Permissions | Create / update / delete | Admin |
-| RBAC probe | `GET .../rbac/probe/:cluster_id/:namespace` | Bearer + `read` on namespace |
+| Auth | `POST /api/v1/auth/login` | Public |
+| Auth | `POST /api/v1/auth/refresh` | Public (valid signature + session + refresh window) |
+| Auth | `POST /api/v1/auth/logout` | JWT + session |
+| Users | `POST /api/v1/users` | Unauthenticated only when `users` empty; else JWT + admin |
+| Users | `GET /api/v1/users`, `DELETE /api/v1/users/:id` | Admin + JWT |
+| Users | `GET/PUT /api/v1/users/:id` | Self or admin + JWT |
+| Teams | `GET /api/v1/teams`, `GET /api/v1/teams/:id`, members list | Member of team or admin + JWT |
+| Teams | Mutations | Admin + JWT |
+| Permissions | List / get / check | Scoped to user’s teams unless admin + JWT |
+| Permissions | Create / update / delete | Admin + JWT |
+| RBAC probe | `GET .../rbac/probe/:cluster_id/:namespace` | JWT + `read` on namespace |
 
-Exact registration order lives in `internal/api/register_phase2.go` to avoid Gin path shadowing (`/permissions/check` before `/permissions/:id`, `/teams/:id/members` before `/teams/:id`).
+Auth routes: `internal/api/register_auth.go`. Phase 2 resource routes: `internal/api/register_phase2.go` (Gin order avoids path shadowing).
 
 ---
 
@@ -323,7 +340,9 @@ Exact registration order lives in `internal/api/register_phase2.go` to avoid Gin
 | `REDIS_URL` | Redis URL. |
 | `PORT` | HTTP listen port (default `8080`). |
 | `LOG_LEVEL` | Set to `debug` for verbose logs. |
-| `JWT_SECRET` | Reserved for future JWT phase. |
+| `JWT_SECRET` | **Required in prod** (≥32 chars); dev default exists but must be overridden. |
+| `JWT_ACCESS_TTL_MINUTES` | Access token lifetime (default 60). |
+| `JWT_REFRESH_MAX_AGE_HOURS` | How long after `exp` refresh is still allowed (default 168). |
 
 Full list: [.env.example](./.env.example).
 
@@ -358,7 +377,7 @@ make test
 
 ## 9. What is intentionally not built yet
 
-- JWT **login / refresh / logout** endpoints
+- OAuth2 / OIDC, MFA, password reset flows
 - React dashboard
 - Helm chart deploy of the app (chart scaffolding may exist in repo layout; full chart is roadmap)
 - WebSocket metrics stream, AI log analysis, full cluster CRUD via API
@@ -372,6 +391,7 @@ Use [KUBEVISION_PROJECT.md](./KUBEVISION_PROJECT.md) for the phased plan and [CU
 | Date | Change |
 |------|--------|
 | 2026-03-27 | Initial Documentation.md covering Phase 1 + Phase 2 as implemented. |
+| 2026-03-27 | Phase 3: JWT auth, Redis sessions, global middleware; docs updated. |
 
 ---
 
