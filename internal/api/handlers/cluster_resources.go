@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -169,6 +170,160 @@ func (h *ClusterResourcesHandler) ListPods(c *gin.Context) {
 			"node":              node,
 			"restarts":          restarts,
 			"creationTimestamp": p.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+		})
+	}
+	httputil.DataJSONWithMeta(c, http.StatusOK, out, gin.H{"total": len(out)})
+}
+
+// ListServices handles GET /clusters/:id/namespaces/:namespace/services.
+func (h *ClusterResourcesHandler) ListServices(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	if ns == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace required")
+		return
+	}
+	cl, ok := h.client(c, id)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	list, err := cl.Clientset.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		httputil.ErrorJSON(c, http.StatusBadGateway, "kubernetes list services failed: "+err.Error())
+		return
+	}
+	out := make([]gin.H, 0, len(list.Items))
+	for _, s := range list.Items {
+		ports := make([]gin.H, 0, len(s.Spec.Ports))
+		for _, p := range s.Spec.Ports {
+			ports = append(ports, gin.H{
+				"name":       p.Name,
+				"port":       p.Port,
+				"protocol":   string(p.Protocol),
+				"targetPort": p.TargetPort.String(),
+				"nodePort":   p.NodePort,
+			})
+		}
+		lbHosts := make([]string, 0)
+		lbIPs := make([]string, 0)
+		for _, ing := range s.Status.LoadBalancer.Ingress {
+			if ing.Hostname != "" {
+				lbHosts = append(lbHosts, ing.Hostname)
+			}
+			if ing.IP != "" {
+				lbIPs = append(lbIPs, ing.IP)
+			}
+		}
+		out = append(out, gin.H{
+			"name":              s.Name,
+			"namespace":         s.Namespace,
+			"type":              string(s.Spec.Type),
+			"clusterIP":         s.Spec.ClusterIP,
+			"externalName":      s.Spec.ExternalName,
+			"selector":          s.Spec.Selector,
+			"ports":             ports,
+			"loadBalancerHosts": lbHosts,
+			"loadBalancerIPs":   lbIPs,
+			"creationTimestamp": s.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+		})
+	}
+	httputil.DataJSONWithMeta(c, http.StatusOK, out, gin.H{"total": len(out)})
+}
+
+func ingressBackendSummary(b networkingv1.IngressBackend) gin.H {
+	if b.Service != nil {
+		h := gin.H{"kind": "Service", "name": b.Service.Name}
+		if b.Service.Port.Number != 0 {
+			h["port"] = b.Service.Port.Number
+		}
+		if b.Service.Port.Name != "" {
+			h["portName"] = b.Service.Port.Name
+		}
+		return h
+	}
+	if b.Resource != nil {
+		return gin.H{
+			"kind": "Resource", "apiGroup": b.Resource.APIGroup, "resourceKind": b.Resource.Kind, "name": b.Resource.Name,
+		}
+	}
+	return gin.H{}
+}
+
+// ListIngresses handles GET /clusters/:id/namespaces/:namespace/ingresses.
+func (h *ClusterResourcesHandler) ListIngresses(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	if ns == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace required")
+		return
+	}
+	cl, ok := h.client(c, id)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	list, err := cl.Clientset.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		httputil.ErrorJSON(c, http.StatusBadGateway, "kubernetes list ingresses failed: "+err.Error())
+		return
+	}
+	out := make([]gin.H, 0, len(list.Items))
+	for _, ing := range list.Items {
+		var className string
+		if ing.Spec.IngressClassName != nil {
+			className = *ing.Spec.IngressClassName
+		}
+		rules := make([]gin.H, 0, len(ing.Spec.Rules))
+		hosts := make([]string, 0)
+		for _, r := range ing.Spec.Rules {
+			if r.Host != "" {
+				hosts = append(hosts, r.Host)
+			}
+			paths := make([]gin.H, 0)
+			if r.HTTP != nil {
+				paths = make([]gin.H, 0, len(r.HTTP.Paths))
+				for _, p := range r.HTTP.Paths {
+					pt := ""
+					if p.PathType != nil {
+						pt = string(*p.PathType)
+					}
+					paths = append(paths, gin.H{
+						"path": p.Path, "pathType": pt, "backend": ingressBackendSummary(p.Backend),
+					})
+				}
+			}
+			rules = append(rules, gin.H{"host": r.Host, "paths": paths})
+		}
+		tls := make([]gin.H, 0, len(ing.Spec.TLS))
+		for _, t := range ing.Spec.TLS {
+			tls = append(tls, gin.H{"hosts": t.Hosts, "secretName": t.SecretName})
+		}
+		lbHosts := make([]string, 0)
+		lbIPs := make([]string, 0)
+		for _, li := range ing.Status.LoadBalancer.Ingress {
+			if li.Hostname != "" {
+				lbHosts = append(lbHosts, li.Hostname)
+			}
+			if li.IP != "" {
+				lbIPs = append(lbIPs, li.IP)
+			}
+		}
+		out = append(out, gin.H{
+			"name":              ing.Name,
+			"namespace":         ing.Namespace,
+			"ingressClassName":  className,
+			"hosts":             hosts,
+			"rules":             rules,
+			"tls":               tls,
+			"loadBalancerHosts": lbHosts,
+			"loadBalancerIPs":   lbIPs,
+			"labels":            ing.Labels,
+			"creationTimestamp": ing.CreationTimestamp.Time.UTC().Format(time.RFC3339),
 		})
 	}
 	httputil.DataJSONWithMeta(c, http.StatusOK, out, gin.H{"total": len(out)})
@@ -403,8 +558,8 @@ func (h *ClusterResourcesHandler) RestartDeployment(c *gin.Context) {
 		return
 	}
 	httputil.DataJSON(c, http.StatusOK, gin.H{
-		"name":       dep.Name,
-		"namespace":  dep.Namespace,
+		"name":        dep.Name,
+		"namespace":   dep.Namespace,
 		"restartedAt": dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"],
 	})
 }
