@@ -55,6 +55,12 @@ func registerClusterRoutes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	g.GET("/clusters/:id/namespaces/:namespace/helm/releases/:release/history",
 		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
 		hh.HelmReleaseHistory)
+	g.GET("/clusters/:id/namespaces/:namespace/services/:service",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
+		rh.GetService)
+	g.GET("/clusters/:id/namespaces/:namespace/ingresses/:ingress",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
+		rh.GetIngress)
 	g.GET("/clusters/:id/namespaces/:namespace/services",
 		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
 		rh.ListServices)

@@ -175,6 +175,115 @@ func (h *ClusterResourcesHandler) ListPods(c *gin.Context) {
 	httputil.DataJSONWithMeta(c, http.StatusOK, out, gin.H{"total": len(out)})
 }
 
+func servicePortsJSON(ports []corev1.ServicePort) []gin.H {
+	out := make([]gin.H, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, gin.H{
+			"name":       p.Name,
+			"port":       p.Port,
+			"protocol":   string(p.Protocol),
+			"targetPort": p.TargetPort.String(),
+			"nodePort":   p.NodePort,
+		})
+	}
+	return out
+}
+
+func loadBalancerIngressToHostsIPs(ings []corev1.LoadBalancerIngress) (hosts, ips []string) {
+	for _, ing := range ings {
+		if ing.Hostname != "" {
+			hosts = append(hosts, ing.Hostname)
+		}
+		if ing.IP != "" {
+			ips = append(ips, ing.IP)
+		}
+	}
+	return hosts, ips
+}
+
+func serviceListJSON(s *corev1.Service) gin.H {
+	lbHosts, lbIPs := loadBalancerIngressToHostsIPs(s.Status.LoadBalancer.Ingress)
+	return gin.H{
+		"name":              s.Name,
+		"namespace":         s.Namespace,
+		"type":              string(s.Spec.Type),
+		"clusterIP":         s.Spec.ClusterIP,
+		"externalName":      s.Spec.ExternalName,
+		"selector":          s.Spec.Selector,
+		"ports":             servicePortsJSON(s.Spec.Ports),
+		"loadBalancerHosts": lbHosts,
+		"loadBalancerIPs":   lbIPs,
+		"creationTimestamp": s.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+	}
+}
+
+func serviceToJSON(s *corev1.Service) gin.H {
+	lbHosts, lbIPs := loadBalancerIngressToHostsIPs(s.Status.LoadBalancer.Ingress)
+	h := gin.H{
+		"name":              s.Name,
+		"namespace":         s.Namespace,
+		"uid":               string(s.UID),
+		"labels":            s.Labels,
+		"annotations":       s.Annotations,
+		"type":              string(s.Spec.Type),
+		"clusterIP":         s.Spec.ClusterIP,
+		"clusterIPs":        s.Spec.ClusterIPs,
+		"externalIPs":       s.Spec.ExternalIPs,
+		"externalName":      s.Spec.ExternalName,
+		"sessionAffinity":   string(s.Spec.SessionAffinity),
+		"selector":          s.Spec.Selector,
+		"ports":             servicePortsJSON(s.Spec.Ports),
+		"loadBalancerHosts": lbHosts,
+		"loadBalancerIPs":   lbIPs,
+		"creationTimestamp": s.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+	}
+	if len(s.Spec.IPFamilies) > 0 {
+		fams := make([]string, 0, len(s.Spec.IPFamilies))
+		for _, f := range s.Spec.IPFamilies {
+			fams = append(fams, string(f))
+		}
+		h["ipFamilies"] = fams
+	}
+	if s.Spec.IPFamilyPolicy != nil {
+		h["ipFamilyPolicy"] = string(*s.Spec.IPFamilyPolicy)
+	}
+	if s.Spec.InternalTrafficPolicy != nil {
+		h["internalTrafficPolicy"] = string(*s.Spec.InternalTrafficPolicy)
+	}
+	if s.Spec.SessionAffinityConfig != nil && s.Spec.SessionAffinityConfig.ClientIP != nil {
+		h["sessionAffinityClientIPTTL"] = s.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds
+	}
+	return h
+}
+
+// GetService handles GET /clusters/:id/namespaces/:namespace/services/:service.
+func (h *ClusterResourcesHandler) GetService(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	name := strings.TrimSpace(c.Param("service"))
+	if ns == "" || name == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace and service name required")
+		return
+	}
+	cl, ok := h.client(c, id)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	svc, err := cl.Clientset.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			httputil.ErrorJSON(c, http.StatusNotFound, "service not found")
+			return
+		}
+		httputil.ErrorJSON(c, http.StatusBadGateway, "kubernetes get service failed: "+err.Error())
+		return
+	}
+	httputil.DataJSON(c, http.StatusOK, serviceToJSON(svc))
+}
+
 // ListServices handles GET /clusters/:id/namespaces/:namespace/services.
 func (h *ClusterResourcesHandler) ListServices(c *gin.Context) {
 	id := strings.TrimSpace(c.Param("id"))
@@ -196,39 +305,8 @@ func (h *ClusterResourcesHandler) ListServices(c *gin.Context) {
 		return
 	}
 	out := make([]gin.H, 0, len(list.Items))
-	for _, s := range list.Items {
-		ports := make([]gin.H, 0, len(s.Spec.Ports))
-		for _, p := range s.Spec.Ports {
-			ports = append(ports, gin.H{
-				"name":       p.Name,
-				"port":       p.Port,
-				"protocol":   string(p.Protocol),
-				"targetPort": p.TargetPort.String(),
-				"nodePort":   p.NodePort,
-			})
-		}
-		lbHosts := make([]string, 0)
-		lbIPs := make([]string, 0)
-		for _, ing := range s.Status.LoadBalancer.Ingress {
-			if ing.Hostname != "" {
-				lbHosts = append(lbHosts, ing.Hostname)
-			}
-			if ing.IP != "" {
-				lbIPs = append(lbIPs, ing.IP)
-			}
-		}
-		out = append(out, gin.H{
-			"name":              s.Name,
-			"namespace":         s.Namespace,
-			"type":              string(s.Spec.Type),
-			"clusterIP":         s.Spec.ClusterIP,
-			"externalName":      s.Spec.ExternalName,
-			"selector":          s.Spec.Selector,
-			"ports":             ports,
-			"loadBalancerHosts": lbHosts,
-			"loadBalancerIPs":   lbIPs,
-			"creationTimestamp": s.CreationTimestamp.Time.UTC().Format(time.RFC3339),
-		})
+	for i := range list.Items {
+		out = append(out, serviceListJSON(&list.Items[i]))
 	}
 	httputil.DataJSONWithMeta(c, http.StatusOK, out, gin.H{"total": len(out)})
 }
@@ -252,6 +330,110 @@ func ingressBackendSummary(b networkingv1.IngressBackend) gin.H {
 	return gin.H{}
 }
 
+func ingressToJSON(ing *networkingv1.Ingress) gin.H {
+	var className string
+	if ing.Spec.IngressClassName != nil {
+		className = *ing.Spec.IngressClassName
+	}
+	rules := make([]gin.H, 0, len(ing.Spec.Rules))
+	hosts := make([]string, 0)
+	for _, r := range ing.Spec.Rules {
+		if r.Host != "" {
+			hosts = append(hosts, r.Host)
+		}
+		paths := make([]gin.H, 0)
+		if r.HTTP != nil {
+			paths = make([]gin.H, 0, len(r.HTTP.Paths))
+			for _, p := range r.HTTP.Paths {
+				pt := ""
+				if p.PathType != nil {
+					pt = string(*p.PathType)
+				}
+				paths = append(paths, gin.H{
+					"path": p.Path, "pathType": pt, "backend": ingressBackendSummary(p.Backend),
+				})
+			}
+		}
+		rules = append(rules, gin.H{"host": r.Host, "paths": paths})
+	}
+	tls := make([]gin.H, 0, len(ing.Spec.TLS))
+	for _, t := range ing.Spec.TLS {
+		tls = append(tls, gin.H{"hosts": t.Hosts, "secretName": t.SecretName})
+	}
+	lbHosts := make([]string, 0)
+	lbIPs := make([]string, 0)
+	for _, li := range ing.Status.LoadBalancer.Ingress {
+		if li.Hostname != "" {
+			lbHosts = append(lbHosts, li.Hostname)
+		}
+		if li.IP != "" {
+			lbIPs = append(lbIPs, li.IP)
+		}
+	}
+	out := gin.H{
+		"name":              ing.Name,
+		"namespace":         ing.Namespace,
+		"uid":               string(ing.UID),
+		"labels":            ing.Labels,
+		"annotations":       ing.Annotations,
+		"ingressClassName":  className,
+		"hosts":             hosts,
+		"rules":             rules,
+		"tls":               tls,
+		"loadBalancerHosts": lbHosts,
+		"loadBalancerIPs":   lbIPs,
+		"creationTimestamp": ing.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+	}
+	if ing.Spec.DefaultBackend != nil {
+		out["defaultBackend"] = ingressBackendSummary(*ing.Spec.DefaultBackend)
+	}
+	return out
+}
+
+func ingressListJSON(ing *networkingv1.Ingress) gin.H {
+	j := ingressToJSON(ing)
+	return gin.H{
+		"name":              j["name"],
+		"namespace":         j["namespace"],
+		"ingressClassName":  j["ingressClassName"],
+		"hosts":             j["hosts"],
+		"rules":             j["rules"],
+		"tls":               j["tls"],
+		"loadBalancerHosts": j["loadBalancerHosts"],
+		"loadBalancerIPs":   j["loadBalancerIPs"],
+		"labels":            j["labels"],
+		"creationTimestamp": j["creationTimestamp"],
+	}
+}
+
+// GetIngress handles GET /clusters/:id/namespaces/:namespace/ingresses/:ingress.
+func (h *ClusterResourcesHandler) GetIngress(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	name := strings.TrimSpace(c.Param("ingress"))
+	if ns == "" || name == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace and ingress name required")
+		return
+	}
+	cl, ok := h.client(c, id)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	ing, err := cl.Clientset.NetworkingV1().Ingresses(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			httputil.ErrorJSON(c, http.StatusNotFound, "ingress not found")
+			return
+		}
+		httputil.ErrorJSON(c, http.StatusBadGateway, "kubernetes get ingress failed: "+err.Error())
+		return
+	}
+	httputil.DataJSON(c, http.StatusOK, ingressToJSON(ing))
+}
+
 // ListIngresses handles GET /clusters/:id/namespaces/:namespace/ingresses.
 func (h *ClusterResourcesHandler) ListIngresses(c *gin.Context) {
 	id := strings.TrimSpace(c.Param("id"))
@@ -273,58 +455,8 @@ func (h *ClusterResourcesHandler) ListIngresses(c *gin.Context) {
 		return
 	}
 	out := make([]gin.H, 0, len(list.Items))
-	for _, ing := range list.Items {
-		var className string
-		if ing.Spec.IngressClassName != nil {
-			className = *ing.Spec.IngressClassName
-		}
-		rules := make([]gin.H, 0, len(ing.Spec.Rules))
-		hosts := make([]string, 0)
-		for _, r := range ing.Spec.Rules {
-			if r.Host != "" {
-				hosts = append(hosts, r.Host)
-			}
-			paths := make([]gin.H, 0)
-			if r.HTTP != nil {
-				paths = make([]gin.H, 0, len(r.HTTP.Paths))
-				for _, p := range r.HTTP.Paths {
-					pt := ""
-					if p.PathType != nil {
-						pt = string(*p.PathType)
-					}
-					paths = append(paths, gin.H{
-						"path": p.Path, "pathType": pt, "backend": ingressBackendSummary(p.Backend),
-					})
-				}
-			}
-			rules = append(rules, gin.H{"host": r.Host, "paths": paths})
-		}
-		tls := make([]gin.H, 0, len(ing.Spec.TLS))
-		for _, t := range ing.Spec.TLS {
-			tls = append(tls, gin.H{"hosts": t.Hosts, "secretName": t.SecretName})
-		}
-		lbHosts := make([]string, 0)
-		lbIPs := make([]string, 0)
-		for _, li := range ing.Status.LoadBalancer.Ingress {
-			if li.Hostname != "" {
-				lbHosts = append(lbHosts, li.Hostname)
-			}
-			if li.IP != "" {
-				lbIPs = append(lbIPs, li.IP)
-			}
-		}
-		out = append(out, gin.H{
-			"name":              ing.Name,
-			"namespace":         ing.Namespace,
-			"ingressClassName":  className,
-			"hosts":             hosts,
-			"rules":             rules,
-			"tls":               tls,
-			"loadBalancerHosts": lbHosts,
-			"loadBalancerIPs":   lbIPs,
-			"labels":            ing.Labels,
-			"creationTimestamp": ing.CreationTimestamp.Time.UTC().Format(time.RFC3339),
-		})
+	for i := range list.Items {
+		out = append(out, ingressListJSON(&list.Items[i]))
 	}
 	httputil.DataJSONWithMeta(c, http.StatusOK, out, gin.H{"total": len(out)})
 }
