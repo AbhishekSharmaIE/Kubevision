@@ -64,6 +64,18 @@ func (h *HelmReposHandler) saveRepoFile(f *repo.File) error {
 	return f.WriteFile(h.repoConfigPath(), 0o600)
 }
 
+// ChartResolveSettings returns Helm CLI settings that use this server's repositories.yaml and chart cache
+// (same paths as GET /helm/repos and install/upgrade chart resolution).
+func (h *HelmReposHandler) ChartResolveSettings() (*cli.EnvSettings, error) {
+	if _, err := h.loadRepoFile(); err != nil {
+		return nil, err
+	}
+	s := cli.New()
+	s.RepositoryConfig = h.repoConfigPath()
+	s.RepositoryCache = h.repoCachePath()
+	return s, nil
+}
+
 // ListHelmRepos handles GET /helm/repos.
 func (h *HelmReposHandler) ListHelmRepos(c *gin.Context) {
 	f, err := h.loadRepoFile()

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,9 +24,8 @@ import (
 )
 
 const (
-	helmOpMaxTimeout   = time.Hour
-	helmOpDefaultWait  = 10 * time.Minute
-	helmReposFileEmpty = "apiVersion: v1\nrepositories: []\n"
+	helmOpMaxTimeout  = time.Hour
+	helmOpDefaultWait = 10 * time.Minute
 )
 
 func ensureHelmRegistryClient(cfg *action.Configuration) error {
@@ -42,30 +40,13 @@ func ensureHelmRegistryClient(cfg *action.Configuration) error {
 	return nil
 }
 
-// tempHelmCLISettings returns isolated Helm cache/config dirs (caller must run cleanup).
-func tempHelmCLISettings() (settings *cli.EnvSettings, cleanup func(), err error) {
-	dir, err := os.MkdirTemp("", "kubevision-helm-*")
-	if err != nil {
-		return nil, nil, err
-	}
-	cleanup = func() { _ = os.RemoveAll(dir) }
-	settings = cli.New()
-	settings.RepositoryCache = dir
-	settings.RepositoryConfig = filepath.Join(dir, "repositories.yaml")
-	if err := os.WriteFile(settings.RepositoryConfig, []byte(helmReposFileEmpty), 0o600); err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-	return settings, cleanup, nil
-}
-
 func validateHelmChartRef(chart string) error {
 	chart = strings.TrimSpace(chart)
 	if chart == "" {
 		return fmt.Errorf("chart is required")
 	}
 	if filepath.IsAbs(chart) || strings.HasPrefix(chart, ".") {
-		return fmt.Errorf("local chart paths are not allowed; use oci://, an http(s) chart URL, or chart name with repoUrl")
+		return fmt.Errorf("local chart paths are not allowed; use oci://, an http(s) chart URL, repo/chart (via POST /helm/repos), or chart name with repoUrl")
 	}
 	if strings.Contains(chart, "..") {
 		return fmt.Errorf("invalid chart reference")
@@ -191,12 +172,11 @@ func (h *HelmHandler) HelmInstallRelease(c *gin.Context) {
 		return
 	}
 
-	settings, cleanup, err := tempHelmCLISettings()
+	settings, err := NewHelmReposHandler().ChartResolveSettings()
 	if err != nil {
-		httputil.ErrorJSON(c, http.StatusInternalServerError, "helm temp dir: "+err.Error())
+		httputil.ErrorJSON(c, http.StatusInternalServerError, "helm chart settings: "+err.Error())
 		return
 	}
-	defer cleanup()
 
 	cfg, err := helmActionConfig(ns, cl.Config, driverName)
 	if err != nil {
@@ -270,12 +250,11 @@ func (h *HelmHandler) HelmUpgradeRelease(c *gin.Context) {
 		return
 	}
 
-	settings, cleanup, err := tempHelmCLISettings()
+	settings, err := NewHelmReposHandler().ChartResolveSettings()
 	if err != nil {
-		httputil.ErrorJSON(c, http.StatusInternalServerError, "helm temp dir: "+err.Error())
+		httputil.ErrorJSON(c, http.StatusInternalServerError, "helm chart settings: "+err.Error())
 		return
 	}
-	defer cleanup()
 
 	cfg, err := helmActionConfig(ns, cl.Config, driverName)
 	if err != nil {
