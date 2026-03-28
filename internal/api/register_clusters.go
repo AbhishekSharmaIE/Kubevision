@@ -37,6 +37,12 @@ func registerClusterRoutes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	g.POST("/clusters/:id/namespaces/:namespace/deployments/:deployment/restart",
 		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermWrite),
 		rh.RestartDeployment)
+	g.POST("/clusters/:id/namespaces/:namespace/helm/releases",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermWrite),
+		hh.HelmInstallRelease)
+	g.PUT("/clusters/:id/namespaces/:namespace/helm/releases/:release",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermWrite),
+		hh.HelmUpgradeRelease)
 	g.GET("/clusters/:id/namespaces/:namespace/helm/releases/:release/values",
 		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
 		hh.HelmReleaseValues)
