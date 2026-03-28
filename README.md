@@ -66,6 +66,8 @@ RBAC: `GET /api/v1/permissions/check?...` and `GET /api/v1/rbac/probe/:cluster_i
 
 Details: [Documentation.md](./Documentation.md).
 
+**Clusters (JWT required):** `GET/POST/DELETE /api/v1/clusters`, `GET /api/v1/clusters/:id` — register kubeconfig via JSON (`kubeconfig` or `kubeconfigBase64`) or multipart field `kubeconfig`. List is scoped by team RBAC unless you are admin.
+
 Stop containers: `make deps-down`
 
 ## Build

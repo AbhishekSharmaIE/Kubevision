@@ -76,17 +76,10 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		v1.GET("/version", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"data": gin.H{"version": os.Getenv("APP_VERSION")}})
 		})
-		v1.GET("/clusters", func(c *gin.Context) {
-			list := cfg.ClusterManager.ListClusters()
-			out := make([]gin.H, 0, len(list))
-			for _, cl := range list {
-				out = append(out, gin.H{"id": cl.ID, "name": cl.Name, "environment": cl.Environment})
-			}
-			c.JSON(http.StatusOK, gin.H{"data": out, "total": len(out)})
-		})
 	}
 
 	registerAuthRoutes(v1, cfg)
+	registerClusterRoutes(v1, cfg)
 	registerPhase2Routes(v1, cfg)
 
 	return r
