@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// registerPhase2Routes mounts users, teams, permissions, and RBAC probe routes under /api/v1.
+// registerPhase2Routes registers users, teams, permissions, Helm repos, and RBAC probe routes under /api/v1.
 func registerPhase2Routes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	if cfg.DB == nil || cfg.JWT == nil || cfg.Redis == nil {
 		return
@@ -19,6 +19,7 @@ func registerPhase2Routes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	uh := handlers.NewUserHandler(cfg.DB)
 	th := handlers.NewTeamHandler(cfg.DB)
 	ph := handlers.NewPermissionHandler(cfg.DB)
+	hr := handlers.NewHelmReposHandler()
 
 	// Bootstrap: first user without auth; later creates need admin JWT.
 	v1.POST("/users", middleware.UserCreateAuth(cfg.JWT, cfg.Redis, cfg.DB), uh.Create)
@@ -46,6 +47,10 @@ func registerPhase2Routes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	auth.POST("/permissions", middleware.RequireAdmin(), ph.Create)
 	auth.PUT("/permissions/:id", middleware.RequireAdmin(), ph.Update)
 	auth.DELETE("/permissions/:id", middleware.RequireAdmin(), ph.Delete)
+
+	auth.GET("/helm/repos", hr.ListHelmRepos)
+	auth.GET("/helm/repos/:repo/charts", hr.ListHelmRepoCharts)
+	auth.POST("/helm/repos", middleware.RequireAdmin(), hr.AddHelmRepo)
 
 	// Example cluster route protected by RBAC (read on namespace).
 	auth.GET("/rbac/probe/:cluster_id/:namespace",

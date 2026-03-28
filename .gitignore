@@ -35,6 +35,7 @@ Thumbs.db
 # Helm
 charts/*.tgz
 !charts/index.yaml
+data/helm/
 
 # Docker
 .docker/
