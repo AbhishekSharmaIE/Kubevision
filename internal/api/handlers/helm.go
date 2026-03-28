@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v3/pkg/storage/driver"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
@@ -134,6 +136,9 @@ func releaseToJSON(r *release.Release) gin.H {
 		if !r.Info.LastDeployed.IsZero() {
 			out["updated"] = r.Info.LastDeployed.UTC().Format(time.RFC3339)
 		}
+		if !r.Info.FirstDeployed.IsZero() {
+			out["firstDeployed"] = r.Info.FirstDeployed.UTC().Format(time.RFC3339)
+		}
 	}
 	if r.Chart != nil && r.Chart.Metadata != nil {
 		out["chart"] = r.Chart.Metadata.Name
@@ -141,6 +146,45 @@ func releaseToJSON(r *release.Release) gin.H {
 		out["appVersion"] = r.Chart.Metadata.AppVersion
 	}
 	return out
+}
+
+func runHelmHistory(cfg *action.Configuration, releaseName string) ([]*release.Release, error) {
+	h := action.NewHistory(cfg)
+	return h.Run(releaseName)
+}
+
+// mergeHelmHistoryByRevision unions revisions from two drivers; same revision prefers entries from primary.
+func mergeHelmHistoryByRevision(primary, secondary []*release.Release) []*release.Release {
+	byRev := make(map[int]*release.Release)
+	for _, r := range primary {
+		if r != nil {
+			byRev[r.Version] = r
+		}
+	}
+	for _, r := range secondary {
+		if r != nil {
+			if _, ok := byRev[r.Version]; !ok {
+				byRev[r.Version] = r
+			}
+		}
+	}
+	revs := make([]int, 0, len(byRev))
+	for v := range byRev {
+		revs = append(revs, v)
+	}
+	sort.Ints(revs)
+	out := make([]*release.Release, 0, len(revs))
+	for _, v := range revs {
+		out = append(out, byRev[v])
+	}
+	return out
+}
+
+func trimHelmHistoryToMax(hist []*release.Release, max int) []*release.Release {
+	if max <= 0 || len(hist) <= max {
+		return hist
+	}
+	return hist[len(hist)-max:]
 }
 
 // ListHelmReleases handles GET /clusters/:id/helm/releases.
@@ -219,6 +263,101 @@ func (h *HelmHandler) ListHelmReleases(c *gin.Context) {
 		meta["driver"] = "both"
 	} else {
 		meta["driver"] = driver
+	}
+	httputil.DataJSONWithMeta(c, http.StatusOK, out, meta)
+}
+
+// HelmReleaseHistory handles GET /clusters/:id/namespaces/:namespace/helm/releases/:release/history.
+// Query: max (default 256, max 500 revisions returned, newest retained), driver: secret, configmap, or both.
+func (h *HelmHandler) HelmReleaseHistory(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	ns := strings.TrimSpace(c.Param("namespace"))
+	releaseName := strings.TrimSpace(c.Param("release"))
+	if ns == "" || releaseName == "" {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "namespace and release name required")
+		return
+	}
+	cl, ok := h.clusterClient(c, id)
+	if !ok {
+		return
+	}
+
+	max := 256
+	if v := c.Query("max"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			max = n
+		}
+	}
+
+	driverName, useBoth, driverOK := parseHelmStorageQuery(c.Query("driver"))
+	if !driverOK {
+		httputil.ErrorJSON(c, http.StatusBadRequest, "driver must be secret, configmap, or both")
+		return
+	}
+
+	var hist []*release.Release
+	var err error
+
+	if useBoth {
+		var sec, cm []*release.Release
+		var errSec, errCM error
+		if cfgS, e := helmActionConfig(ns, cl.Config, "secret"); e != nil {
+			errSec = e
+		} else {
+			sec, errSec = runHelmHistory(cfgS, releaseName)
+		}
+		if cfgC, e := helmActionConfig(ns, cl.Config, "configmap"); e != nil {
+			errCM = e
+		} else {
+			cm, errCM = runHelmHistory(cfgC, releaseName)
+		}
+		if errSec != nil && !errors.Is(errSec, driver.ErrReleaseNotFound) {
+			httputil.ErrorJSON(c, http.StatusBadGateway, "helm history failed (secret): "+errSec.Error())
+			return
+		}
+		if errCM != nil && !errors.Is(errCM, driver.ErrReleaseNotFound) {
+			httputil.ErrorJSON(c, http.StatusBadGateway, "helm history failed (configmap): "+errCM.Error())
+			return
+		}
+		if errSec != nil {
+			sec = nil
+		}
+		if errCM != nil {
+			cm = nil
+		}
+		hist = mergeHelmHistoryByRevision(sec, cm)
+		if len(hist) == 0 {
+			httputil.ErrorJSON(c, http.StatusNotFound, "release not found")
+			return
+		}
+		hist = trimHelmHistoryToMax(hist, max)
+	} else {
+		cfg, errInit := helmActionConfig(ns, cl.Config, driverName)
+		if errInit != nil {
+			httputil.ErrorJSON(c, http.StatusInternalServerError, "helm init failed: "+errInit.Error())
+			return
+		}
+		hist, err = runHelmHistory(cfg, releaseName)
+		if err != nil {
+			if errors.Is(err, driver.ErrReleaseNotFound) {
+				httputil.ErrorJSON(c, http.StatusNotFound, "release not found")
+				return
+			}
+			httputil.ErrorJSON(c, http.StatusBadGateway, "helm history failed: "+err.Error())
+			return
+		}
+		hist = trimHelmHistoryToMax(hist, max)
+	}
+
+	out := make([]gin.H, 0, len(hist))
+	for _, r := range hist {
+		out = append(out, releaseToJSON(r))
+	}
+	meta := gin.H{"total": len(out), "release": releaseName, "namespace": ns}
+	if useBoth {
+		meta["driver"] = "both"
+	} else {
+		meta["driver"] = driverName
 	}
 	httputil.DataJSONWithMeta(c, http.StatusOK, out, meta)
 }
