@@ -21,9 +21,30 @@ func registerClusterRoutes(v1 *gin.RouterGroup, cfg RouterConfig) {
 	g.POST("/clusters", middleware.RequireAdmin(), ch.Create)
 
 	// More specific paths before /clusters/:id
+	g.GET("/clusters/:id/namespaces/:namespace/pods/:pod/logs",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
+		rh.GetPodLogs)
+	g.GET("/clusters/:id/namespaces/:namespace/pods/:pod",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
+		rh.GetPod)
+	g.GET("/clusters/:id/namespaces/:namespace/deployments/:deployment",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
+		rh.GetDeployment)
+	g.PATCH("/clusters/:id/namespaces/:namespace/deployments/:deployment/scale",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermWrite),
+		rh.ScaleDeployment)
+	g.POST("/clusters/:id/namespaces/:namespace/deployments/:deployment/restart",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermWrite),
+		rh.RestartDeployment)
+	g.GET("/clusters/:id/namespaces/:namespace/deployments",
+		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
+		rh.ListDeployments)
 	g.GET("/clusters/:id/namespaces/:namespace/pods",
 		middleware.RequireClusterPermissionByID(cfg.DB, "id", "namespace", rbac.PermRead),
 		rh.ListPods)
+	g.GET("/clusters/:id/events",
+		middleware.RequireClusterScopePermission(cfg.DB, "id", rbac.PermRead),
+		rh.ListEvents)
 	g.GET("/clusters/:id/namespaces",
 		middleware.RequireClusterScopePermission(cfg.DB, "id", rbac.PermRead),
 		rh.ListNamespaces)
