@@ -83,6 +83,3 @@ make build
 
 Go module: `github.com/AbhishekSharmaIE/Kubevision`
 
-## Cursor workflow
-
-See [CURSOR_GIT_WORKFLOW.md](./CURSOR_GIT_WORKFLOW.md) for phased prompts and commit conventions.
